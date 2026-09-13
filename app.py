@@ -23,8 +23,7 @@ try:
 except ImportError:
     st.error("명령 프롬프트에서 'pip install shapely matplotlib pydeck numpy pillow'를 설치해주세요.")
 
-MAPBOX_TOKEN = "pk.eyJ1IjoibGVlamltaW4iLCJhIjoiY210eXN2ZW45MDF6bjJ3cTUydW14enNjZyJ9.XnNv2cPEEEmgeEaJyhtJ2Q"
-
+MAPBOX_TOKEN = st.secrets["MAPBOX_TOKEN"]
 st.set_page_config(page_title="Sitedia 스타일 다이어그램 추출기", layout="wide", initial_sidebar_state="expanded")
 
 with st.sidebar:
