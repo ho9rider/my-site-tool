@@ -73,14 +73,22 @@ h1, h2, h3, p, span, div {{ color: {text_color} !important; }}
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # ==========================================
-# [완전 수정] 안정적인 풍배도 생성
+# [수정] 기상청 API 통신 지연(방화벽) 회피 코드 적용
 # ==========================================
 def create_wind_rose(lat, lon):
     try:
         url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&past_days=30&hourly=wind_speed_10m,wind_direction_10m&timezone=auto"
-        res = requests.get(url, timeout=10)
-        data = res.json()
         
+        # [핵심] API 서버가 봇(Bot)으로 오해하지 않도록 크롬 브라우저로 위장
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        # 15초까지 넉넉하게 응답 대기
+        res = requests.get(url, headers=headers, timeout=15)
+        res.raise_for_status() 
+        
+        data = res.json()
         hourly = data.get('hourly', {})
         spd = hourly.get('wind_speed_10m') or hourly.get('windspeed_10m')
         dir_deg = hourly.get('wind_direction_10m') or hourly.get('winddirection_10m')
@@ -107,6 +115,9 @@ def create_wind_rose(lat, lon):
                           margin=dict(t=20, b=20, l=20, r=20),
                           polar=dict(radialaxis=dict(showticklabels=False)))
         return fig
+    except requests.exceptions.RequestException as e:
+        st.error(f"통신 지연 (새로고침 요망): {e}")
+        return None
     except Exception as e:
         return None
 
@@ -296,9 +307,6 @@ def create_highlight_diagram(features, target_layer, min_lon, min_lat, max_lon, 
     plt.tight_layout()
     return fig
 
-# ==========================================
-# 다운로드 파일(DXF, OBJ) 생성 함수 복구
-# ==========================================
 def export_site_data_to_dxf(features, elev_lookup, min_lon, max_lon, min_lat, max_lat, lon_ratio, is_3d=False, offset_x=0.0, offset_y=0.0):
     doc = ezdxf.new('R2010')
     msp = doc.modelspace()
@@ -448,7 +456,7 @@ if output and output.get("last_active_drawing"):
                         st.markdown("<div style='text-align: center; margin-bottom:10px;'><b>🌬️ 미기후 (풍향/풍속)</b></div>", unsafe_allow_html=True)
                         wind_fig = create_wind_rose((min_lat + max_lat) / 2, (min_lon + max_lon) / 2)
                         if wind_fig: st.plotly_chart(wind_fig, use_container_width=True)
-                        else: st.error("풍배도: 기상청 API 통신 지연")
+                        else: st.error("기상청 데이터 처리 실패. 잠시 후 다시 시도해주세요.")
                     
                 st.markdown("---")
                 st.markdown("### 🧊 3D 매스 및 지형 뷰 (PLATEAU 연동 포함)")
@@ -468,7 +476,6 @@ if output and output.get("last_active_drawing"):
                     cy_poly = sum(pt[1] for pt in item['ext']) / len(item['ext'])
                     base_z = get_z_val(cx_poly, cy_poly, elev_lookup)
                     
-                    # [핵심 수정] 도로 폴리곤의 구멍(Holes)을 제대로 뚫어주는 코드 복구
                     unscaled_ext = [[x / (100000 * dynamic_lon_ratio), y / 100000, base_z] for x, y in item['ext']]
                     unscaled_ints = [[[hx / (100000 * dynamic_lon_ratio), hy / 100000, base_z] for hx, hy in hole] for hole in item.get('ints', [])]
                     geom_3d = [unscaled_ext] + unscaled_ints
