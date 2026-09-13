@@ -6,4 +6,7 @@ shapely
 matplotlib
 pydeck
 numpy
-pillow
+Pillow
+pandas
+plotly
+requests
