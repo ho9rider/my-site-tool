@@ -77,26 +77,33 @@ st.markdown(custom_css, unsafe_allow_html=True)
 # ==========================================
 def create_wind_rose(lat, lon):
     try:
-        url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&past_days=30&hourly=wind_speed_10m,wind_direction_10m&timezone=auto"
+        # 데이터 요청 기간을 14일로 줄여 서버 통신 부하 및 타임아웃 방지
+        url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&past_days=14&hourly=wind_speed_10m,wind_direction_10m&timezone=auto"
         
-        # [핵심] API 서버가 봇(Bot)으로 오해하지 않도록 크롬 브라우저로 위장
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36'
         }
         
-        # 15초까지 넉넉하게 응답 대기
-        res = requests.get(url, headers=headers, timeout=15)
-        res.raise_for_status() 
+        res = requests.get(url, headers=headers, timeout=10)
         
+        # API 서버 차단(429) 또는 서버 에러(500) 확인
+        if res.status_code != 200:
+            st.error(f"기상 서버 응답 지연 (상태 코드: {res.status_code}). 잠시 후 다시 드래그해 주세요.")
+            return None
+            
         data = res.json()
         hourly = data.get('hourly', {})
         spd = hourly.get('wind_speed_10m') or hourly.get('windspeed_10m')
         dir_deg = hourly.get('wind_direction_10m') or hourly.get('winddirection_10m')
         
-        if not spd or not dir_deg: return None
+        if not spd or not dir_deg: 
+            st.error("해당 대지의 유효한 기상 데이터가 없습니다.")
+            return None
             
         df = pd.DataFrame({'Speed': spd, 'Dir': dir_deg}).dropna()
-        
+        if df.empty:
+            return None
+            
         bins = [0, 2, 4, 6, 8, 10, 100]
         labels = ['0-2 m/s', '2-4 m/s', '4-6 m/s', '6-8 m/s', '8-10 m/s', '>10 m/s']
         df['Speed'] = pd.cut(df['Speed'], bins=bins, labels=labels, right=False)
@@ -107,6 +114,10 @@ def create_wind_rose(lat, lon):
         df['Dir'] = df['Dir'].replace('N2', 'N')
         
         counts = df.groupby(['Dir', 'Speed'], observed=False).size().reset_index(name='Freq')
+        
+        if counts['Freq'].sum() == 0:
+            return None
+            
         counts['Freq'] = counts['Freq'] / counts['Freq'].sum() * 100
         
         fig = px.bar_polar(counts, r="Freq", theta="Dir", color="Speed", template="plotly_dark",
@@ -115,12 +126,14 @@ def create_wind_rose(lat, lon):
                           margin=dict(t=20, b=20, l=20, r=20),
                           polar=dict(radialaxis=dict(showticklabels=False)))
         return fig
-    except requests.exceptions.RequestException as e:
-        st.error(f"통신 지연 (새로고침 요망): {e}")
+        
+    except requests.exceptions.RequestException:
+        st.error("기상청 서버와의 통신 시간이 초과되었습니다. 대지 영역을 다시 드래그해 보세요.")
         return None
     except Exception as e:
+        st.error(f"데이터 분석 중 오류 발생: {e}")
         return None
-
+    
 def calc_real_distance(lon1, lat1, lon2, lat2):
     R = 6371.0 
     dlat = math.radians(lat2 - lat1)
