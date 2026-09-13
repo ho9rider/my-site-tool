@@ -73,25 +73,32 @@ h1, h2, h3, p, span, div {{ color: {text_color} !important; }}
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # ==========================================
-# [수정] 풍배도 생성 함수 (API 파라미터 철자 수정 및 사이즈 조정)
+# [완전 수정] 안정적인 풍배도 생성
 # ==========================================
 def create_wind_rose(lat, lon):
     try:
-        url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&past_days=60&hourly=wind_speed_10m,wind_direction_10m"
+        url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&past_days=30&hourly=wind_speed_10m,wind_direction_10m&timezone=auto"
         res = requests.get(url, timeout=10)
         data = res.json()
-        df = pd.DataFrame(data['hourly']).dropna()
+        
+        hourly = data.get('hourly', {})
+        spd = hourly.get('wind_speed_10m') or hourly.get('windspeed_10m')
+        dir_deg = hourly.get('wind_direction_10m') or hourly.get('winddirection_10m')
+        
+        if not spd or not dir_deg: return None
+            
+        df = pd.DataFrame({'Speed': spd, 'Dir': dir_deg}).dropna()
         
         bins = [0, 2, 4, 6, 8, 10, 100]
         labels = ['0-2 m/s', '2-4 m/s', '4-6 m/s', '6-8 m/s', '8-10 m/s', '>10 m/s']
-        df['Speed'] = pd.cut(df['wind_speed_10m'], bins=bins, labels=labels, right=False)
+        df['Speed'] = pd.cut(df['Speed'], bins=bins, labels=labels, right=False)
         
         dir_bins = np.arange(-11.25, 371.25, 22.5)
         dir_labels = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW', 'N2']
-        df['Dir'] = pd.cut(df['wind_direction_10m'], bins=dir_bins, labels=dir_labels)
+        df['Dir'] = pd.cut(df['Dir'], bins=dir_bins, labels=dir_labels)
         df['Dir'] = df['Dir'].replace('N2', 'N')
         
-        counts = df.groupby(['Dir', 'Speed']).size().reset_index(name='Freq')
+        counts = df.groupby(['Dir', 'Speed'], observed=False).size().reset_index(name='Freq')
         counts['Freq'] = counts['Freq'] / counts['Freq'].sum() * 100
         
         fig = px.bar_polar(counts, r="Freq", theta="Dir", color="Speed", template="plotly_dark",
@@ -289,6 +296,102 @@ def create_highlight_diagram(features, target_layer, min_lon, min_lat, max_lon, 
     plt.tight_layout()
     return fig
 
+# ==========================================
+# 다운로드 파일(DXF, OBJ) 생성 함수 복구
+# ==========================================
+def export_site_data_to_dxf(features, elev_lookup, min_lon, max_lon, min_lat, max_lat, lon_ratio, is_3d=False, offset_x=0.0, offset_y=0.0):
+    doc = ezdxf.new('R2010')
+    msp = doc.modelspace()
+    colors = {'BLDG_HIGH': 1, 'BLDG_LOW': 8, 'ROAD_BLOCK': 2, 'GREEN': 3, 'WATER_POLY': 5, 'CONTOUR': 7, 'HUMAN_SCALE': 6}
+    for name, color in colors.items(): doc.layers.add(name, color=color)
+
+    for item in features:
+        layer, ext, ints = item['layer'], item['ext'], item['ints']
+        if layer == 'CONTOUR':
+            shifted_ext = [(float(pt[0] - offset_x), float(pt[1] - offset_y)) for pt in ext]
+            if is_3d:
+                z_val = float(item.get('height', 0))
+                pts_3d = [(pt[0], pt[1], z_val) for pt in shifted_ext]
+                msp.add_polyline3d(pts_3d, dxfattribs={'layer': layer})
+            else:
+                msp.add_lwpolyline(shifted_ext, close=False, dxfattribs={'layer': layer})
+            continue
+
+        shifted_ext = [(float(pt[0] - offset_x), float(pt[1] - offset_y)) for pt in ext]
+        shifted_ints = [[(float(pt[0] - offset_x), float(pt[1] - offset_y)) for pt in hole] for hole in ints]
+        
+        thickness = 25.0 if is_3d and layer == 'BLDG_HIGH' else (8.0 if is_3d and layer == 'BLDG_LOW' else 0.0)
+        closest_z = get_z_val(sum(pt[0] for pt in ext)/len(ext), sum(pt[1] for pt in ext)/len(ext), elev_lookup) if is_3d else 0.0
+            
+        pline = msp.add_lwpolyline(shifted_ext, close=True, dxfattribs={'layer': layer})
+        if thickness > 0: pline.dxf.thickness = thickness
+        if is_3d: pline.dxf.elevation = closest_z
+        
+        for hole in shifted_ints: 
+            h_pline = msp.add_lwpolyline(hole, close=True, dxfattribs={'layer': layer})
+            if thickness > 0: h_pline.dxf.thickness = thickness
+            if is_3d: h_pline.dxf.elevation = closest_z
+            
+        if not is_3d:
+            try:
+                hatch = msp.add_hatch(color=256, dxfattribs={'layer': layer})
+                hatch.paths.add_polyline_path(shifted_ext, is_closed=True)
+                for hole in shifted_ints: hatch.paths.add_polyline_path(hole, is_closed=True)
+            except: pass
+
+    tmp_dir = tempfile.gettempdir()
+    file_name = "Site_Mass_3D.dxf" if is_3d else "Site_Diagram_2D.dxf"
+    file_path = os.path.join(tmp_dir, file_name)
+    doc.saveas(file_path)
+    return file_path
+
+def export_site_data_to_obj(features, elev_lookup, min_lon, max_lon, min_lat, max_lat, lon_ratio, offset_x=0.0, offset_y=0.0):
+    tmp_dir = tempfile.gettempdir()
+    file_path = os.path.join(tmp_dir, "Site_Mass_3D.obj")
+    with open(file_path, 'w', encoding='utf-8') as f:
+        f.write("# Sitedia 3D OBJ Export\n")
+        v_idx = 1
+        for item in features:
+            layer, ext, ints = item['layer'], item['ext'], item['ints']
+            if layer == 'CONTOUR':
+                h = float(item.get('height', 0))
+                idxs = []
+                for pt in ext:
+                    f.write(f"v {pt[0]-offset_x} {pt[1]-offset_y} {h}\n")
+                    idxs.append(v_idx)
+                    v_idx += 1
+                f.write("l " + " ".join(map(str, idxs)) + "\n")
+                continue
+            
+            if layer not in ['BLDG_HIGH', 'BLDG_LOW']:
+                base_zs = [get_z_val(pt[0], pt[1], elev_lookup) for pt in ext]
+                idxs = []
+                for pt, z in zip(ext, base_zs):
+                    f.write(f"v {pt[0]-offset_x} {pt[1]-offset_y} {z}\n")
+                    idxs.append(v_idx)
+                    v_idx += 1
+                f.write("f " + " ".join(map(str, idxs)) + "\n")
+            else:
+                thickness = 25.0 if layer == 'BLDG_HIGH' else 8.0
+                base_z = get_z_val(sum(pt[0] for pt in ext)/len(ext), sum(pt[1] for pt in ext)/len(ext), elev_lookup)
+                top_z = base_z + thickness
+                
+                b_idxs, t_idxs = [], []
+                for pt in ext:
+                    f.write(f"v {pt[0]-offset_x} {pt[1]-offset_y} {base_z}\n")
+                    b_idxs.append(v_idx)
+                    v_idx += 1
+                for pt in ext:
+                    f.write(f"v {pt[0]-offset_x} {pt[1]-offset_y} {top_z}\n")
+                    t_idxs.append(v_idx)
+                    v_idx += 1
+                    
+                f.write("f " + " ".join(map(str, reversed(b_idxs))) + "\n")
+                f.write("f " + " ".join(map(str, t_idxs)) + "\n")
+                for i in range(len(ext) - 1):
+                    f.write(f"f {b_idxs[i]} {t_idxs[i]} {t_idxs[i+1]} {b_idxs[i+1]}\n")
+    return file_path
+
 st.title("📍 건축 대지 분석 자동화 툴 (6종 핵심 패널)")
 st.markdown("**1. 영역 지정 (사각형 드래그) 또는 단면 확인 (선 긋기)**")
 
@@ -339,16 +442,13 @@ if output and output.get("last_active_drawing"):
                         fig = create_highlight_diagram(features, layers_r2[i], min_lon, min_lat, max_lon, max_lat, dynamic_lon_ratio)
                         st.pyplot(fig)
 
-                # 7번째 다이어그램으로 풍배도 편입
                 if show_wind:
                     row3 = st.columns(3)
                     with row3[0]:
                         st.markdown("<div style='text-align: center; margin-bottom:10px;'><b>🌬️ 미기후 (풍향/풍속)</b></div>", unsafe_allow_html=True)
                         wind_fig = create_wind_rose((min_lat + max_lat) / 2, (min_lon + max_lon) / 2)
-                        if wind_fig: 
-                            st.plotly_chart(wind_fig, use_container_width=True)
-                        else:
-                            st.error("기상청 API 오류")
+                        if wind_fig: st.plotly_chart(wind_fig, use_container_width=True)
+                        else: st.error("풍배도: 기상청 API 통신 지연")
                     
                 st.markdown("---")
                 st.markdown("### 🧊 3D 매스 및 지형 뷰 (PLATEAU 연동 포함)")
@@ -367,8 +467,11 @@ if output and output.get("last_active_drawing"):
                     cx_poly = sum(pt[0] for pt in item['ext']) / len(item['ext'])
                     cy_poly = sum(pt[1] for pt in item['ext']) / len(item['ext'])
                     base_z = get_z_val(cx_poly, cy_poly, elev_lookup)
-                        
-                    geom_3d = [[[x / (100000 * dynamic_lon_ratio), y / 100000, base_z] for x, y in item['ext']]]
+                    
+                    # [핵심 수정] 도로 폴리곤의 구멍(Holes)을 제대로 뚫어주는 코드 복구
+                    unscaled_ext = [[x / (100000 * dynamic_lon_ratio), y / 100000, base_z] for x, y in item['ext']]
+                    unscaled_ints = [[[hx / (100000 * dynamic_lon_ratio), hy / 100000, base_z] for hx, hy in hole] for hole in item.get('ints', [])]
+                    geom_3d = [unscaled_ext] + unscaled_ints
                     
                     height, color = 0, [0,0,0,0]
                     if layer == 'BLDG_HIGH': height, color = 25, [max(0, 255-darken), max(0, 42-darken//2), max(0, 42-darken//2), 220]
@@ -378,7 +481,6 @@ if output and output.get("last_active_drawing"):
                     elif layer == 'WATER_POLY': height, color = 0.1, [30, 144, 255, 180]
                     
                     if height > 0: 
-                        # PLATEAU 스위치를 켜도 기본 건물 베이스는 남겨두도록 조건 완화
                         polygons_3d.append({'polygon': geom_3d, 'height': height, 'color': color})
                 
                 deck_layers = [
@@ -388,11 +490,24 @@ if output and output.get("last_active_drawing"):
                 
                 if use_plateau:
                     plateau_layer = pdk.Layer(
-                        "Tile3DLayer",
-                        data=plateau_url,
-                        get_point_color=[255, 255, 255, 255],
+                        "Tile3DLayer", data=plateau_url, get_point_color=[255, 255, 255, 255]
                     )
                     deck_layers.append(plateau_layer)
                 
                 view_state = pdk.ViewState(longitude=(min_lon + max_lon) / 2, latitude=(min_lat + max_lat) / 2, zoom=15.5, pitch=40 + (hour_factor * 30), bearing=(sim_hour - 12) * 15)
                 st.pydeck_chart(pdk.Deck(layers=deck_layers, initial_view_state=view_state, map_provider='carto', map_style='dark'), use_container_width=True)
+
+                st.markdown("---")
+                offset_x = ((min_lon + max_lon) / 2) * 100000 * dynamic_lon_ratio
+                offset_y = ((min_lat + max_lat) / 2) * 100000
+                
+                col_dxf1, col_dxf2, col_obj = st.columns(3)
+                with col_dxf1:
+                    dxf_2d = export_site_data_to_dxf(features, elev_lookup, min_lon, max_lon, min_lat, max_lat, dynamic_lon_ratio, is_3d=False, offset_x=offset_x, offset_y=offset_y)
+                    with open(dxf_2d, "rb") as file: st.download_button("📥 2D 다이어그램 (.dxf)", data=file, file_name="Site_Diagram_2D.dxf", mime="application/dxf", use_container_width=True)
+                with col_dxf2:
+                    dxf_3d = export_site_data_to_dxf(features, elev_lookup, min_lon, max_lon, min_lat, max_lat, dynamic_lon_ratio, is_3d=True, offset_x=offset_x, offset_y=offset_y)
+                    with open(dxf_3d, "rb") as file: st.download_button("📦 3D 매스 (.dxf)", data=file, file_name="Site_Mass_3D.dxf", mime="application/dxf", use_container_width=True)
+                with col_obj:
+                    obj_3d = export_site_data_to_obj(features, elev_lookup, min_lon, max_lon, min_lat, max_lat, dynamic_lon_ratio, offset_x=offset_x, offset_y=offset_y)
+                    with open(obj_3d, "rb") as file: st.download_button("🧊 블렌더 3D 매스 (.obj)", data=file, file_name="Site_Mass_3D.obj", mime="text/plain", use_container_width=True)
