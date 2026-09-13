@@ -1,0 +1,9 @@
+streamlit
+folium
+streamlit-folium
+ezdxf
+shapely
+matplotlib
+pydeck
+numpy
+pillow
