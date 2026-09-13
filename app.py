@@ -73,67 +73,71 @@ h1, h2, h3, p, span, div {{ color: {text_color} !important; }}
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # ==========================================
-# [수정] 기상청 API 통신 지연(방화벽) 회피 코드 적용
+# [완벽 수정] API 호출 캐싱 및 비상용 가상 데이터 생성
 # ==========================================
-def create_wind_rose(lat, lon):
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_wind_data(lat_r, lon_r):
     try:
-        # 데이터 요청 기간을 14일로 줄여 서버 통신 부하 및 타임아웃 방지
-        url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&past_days=14&hourly=wind_speed_10m,wind_direction_10m&timezone=auto"
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        
-        res = requests.get(url, headers=headers, timeout=10)
-        
-        # API 서버 차단(429) 또는 서버 에러(500) 확인
-        if res.status_code != 200:
-            st.error(f"기상 서버 응답 지연 (상태 코드: {res.status_code}). 잠시 후 다시 드래그해 주세요.")
-            return None
-            
-        data = res.json()
-        hourly = data.get('hourly', {})
+        url = f"https://api.open-meteo.com/v1/forecast?latitude={lat_r}&longitude={lon_r}&past_days=14&hourly=wind_speed_10m,wind_direction_10m&timezone=auto"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0'}
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            return res.json()
+        return None
+    except:
+        return None
+
+def create_wind_rose(lat, lon):
+    # 좌표를 소수점 2자리(약 1km 반경)로 반올림하여 불필요한 중복 API 호출 방지
+    data = fetch_wind_data(round(lat, 2), round(lon, 2))
+    is_mock = False
+    
+    if data and 'hourly' in data:
+        hourly = data['hourly']
         spd = hourly.get('wind_speed_10m') or hourly.get('windspeed_10m')
         dir_deg = hourly.get('wind_direction_10m') or hourly.get('winddirection_10m')
-        
-        if not spd or not dir_deg: 
-            st.error("해당 대지의 유효한 기상 데이터가 없습니다.")
-            return None
-            
-        df = pd.DataFrame({'Speed': spd, 'Dir': dir_deg}).dropna()
-        if df.empty:
-            return None
-            
-        bins = [0, 2, 4, 6, 8, 10, 100]
-        labels = ['0-2 m/s', '2-4 m/s', '4-6 m/s', '6-8 m/s', '8-10 m/s', '>10 m/s']
-        df['Speed'] = pd.cut(df['Speed'], bins=bins, labels=labels, right=False)
-        
-        dir_bins = np.arange(-11.25, 371.25, 22.5)
-        dir_labels = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW', 'N2']
-        df['Dir'] = pd.cut(df['Dir'], bins=dir_bins, labels=dir_labels)
-        df['Dir'] = df['Dir'].replace('N2', 'N')
-        
-        counts = df.groupby(['Dir', 'Speed'], observed=False).size().reset_index(name='Freq')
-        
-        if counts['Freq'].sum() == 0:
-            return None
-            
-        counts['Freq'] = counts['Freq'] / counts['Freq'].sum() * 100
-        
-        fig = px.bar_polar(counts, r="Freq", theta="Dir", color="Speed", template="plotly_dark",
-                           color_discrete_sequence=px.colors.sequential.Plasma)
-        fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
-                          margin=dict(t=20, b=20, l=20, r=20),
-                          polar=dict(radialaxis=dict(showticklabels=False)))
-        return fig
-        
-    except requests.exceptions.RequestException:
-        st.error("기상청 서버와의 통신 시간이 초과되었습니다. 대지 영역을 다시 드래그해 보세요.")
-        return None
-    except Exception as e:
-        st.error(f"데이터 분석 중 오류 발생: {e}")
-        return None
+        if not spd or not dir_deg:
+            is_mock = True
+    else:
+        is_mock = True
+
+    if is_mock:
+        # API가 차단되었을 때: 도쿄/관동 일대의 겨울철 평균 풍향(북서풍)을 모방한 가상 데이터 14일치 자동 생성
+        np.random.seed(42)
+        spd = np.random.weibull(2, 336) * 3.5 
+        dir_deg = np.random.normal(330, 45, 336) % 360 
+
+    df = pd.DataFrame({'Speed': spd, 'Dir': dir_deg}).dropna()
     
+    bins = [0, 2, 4, 6, 8, 10, 100]
+    labels = ['0-2 m/s', '2-4 m/s', '4-6 m/s', '6-8 m/s', '8-10 m/s', '>10 m/s']
+    df['Speed'] = pd.cut(df['Speed'], bins=bins, labels=labels, right=False)
+    
+    dir_bins = np.arange(-11.25, 371.25, 22.5)
+    dir_labels = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW', 'N2']
+    df['Dir'] = pd.cut(df['Dir'], bins=dir_bins, labels=dir_labels)
+    df['Dir'] = df['Dir'].replace('N2', 'N')
+    
+    counts = df.groupby(['Dir', 'Speed'], observed=False).size().reset_index(name='Freq')
+    if counts['Freq'].sum() == 0: return None
+    
+    counts['Freq'] = counts['Freq'] / counts['Freq'].sum() * 100
+    
+    title_text = "대지 주변 미기후 (최근 14일)" if not is_mock else "풍배도 (API 제한 - 샘플 데이터)"
+    
+    fig = px.bar_polar(counts, r="Freq", theta="Dir", color="Speed", template="plotly_dark",
+                       color_discrete_sequence=px.colors.sequential.Plasma,
+                       title=title_text)
+    fig.update_layout(
+        paper_bgcolor='rgba(0,0,0,0)', 
+        plot_bgcolor='rgba(0,0,0,0)', 
+        margin=dict(t=40, b=20, l=20, r=20),
+        polar=dict(radialaxis=dict(showticklabels=False)),
+        title_font=dict(size=14, color='white'),
+        title_x=0.5
+    )
+    return fig
+
 def calc_real_distance(lon1, lat1, lon2, lat2):
     R = 6371.0 
     dlat = math.radians(lat2 - lat1)
@@ -466,10 +470,9 @@ if output and output.get("last_active_drawing"):
                 if show_wind:
                     row3 = st.columns(3)
                     with row3[0]:
-                        st.markdown("<div style='text-align: center; margin-bottom:10px;'><b>🌬️ 미기후 (풍향/풍속)</b></div>", unsafe_allow_html=True)
+                        st.markdown("<div style='text-align: center; margin-bottom:10px;'></div>", unsafe_allow_html=True)
                         wind_fig = create_wind_rose((min_lat + max_lat) / 2, (min_lon + max_lon) / 2)
                         if wind_fig: st.plotly_chart(wind_fig, use_container_width=True)
-                        else: st.error("기상청 데이터 처리 실패. 잠시 후 다시 시도해주세요.")
                     
                 st.markdown("---")
                 st.markdown("### 🧊 3D 매스 및 지형 뷰 (PLATEAU 연동 포함)")
