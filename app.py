@@ -73,7 +73,7 @@ h1, h2, h3, p, span, div {{ color: {text_color} !important; }}
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # ==========================================
-# [완벽 수정] API 호출 캐싱 및 비상용 가상 데이터 생성
+# API 호출 캐싱 및 Pandas Cut 에러(ValueError) 수정
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_wind_data(lat_r, lon_r):
@@ -88,7 +88,6 @@ def fetch_wind_data(lat_r, lon_r):
         return None
 
 def create_wind_rose(lat, lon):
-    # 좌표를 소수점 2자리(약 1km 반경)로 반올림하여 불필요한 중복 API 호출 방지
     data = fetch_wind_data(round(lat, 2), round(lon, 2))
     is_mock = False
     
@@ -102,7 +101,6 @@ def create_wind_rose(lat, lon):
         is_mock = True
 
     if is_mock:
-        # API가 차단되었을 때: 도쿄/관동 일대의 겨울철 평균 풍향(북서풍)을 모방한 가상 데이터 14일치 자동 생성
         np.random.seed(42)
         spd = np.random.weibull(2, 336) * 3.5 
         dir_deg = np.random.normal(330, 45, 336) % 360 
@@ -113,7 +111,8 @@ def create_wind_rose(lat, lon):
     labels = ['0-2 m/s', '2-4 m/s', '4-6 m/s', '6-8 m/s', '8-10 m/s', '>10 m/s']
     df['Speed'] = pd.cut(df['Speed'], bins=bins, labels=labels, right=False)
     
-    dir_bins = np.arange(-11.25, 371.25, 22.5)
+    # [핵심 수정] 372.0 대신 380으로 넉넉하게 잡아 마지막 경계값(Edge) 누락 에러 방지
+    dir_bins = np.arange(-11.25, 380.0, 22.5) 
     dir_labels = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW', 'N2']
     df['Dir'] = pd.cut(df['Dir'], bins=dir_bins, labels=dir_labels)
     df['Dir'] = df['Dir'].replace('N2', 'N')
@@ -122,7 +121,6 @@ def create_wind_rose(lat, lon):
     if counts['Freq'].sum() == 0: return None
     
     counts['Freq'] = counts['Freq'] / counts['Freq'].sum() * 100
-    
     title_text = "대지 주변 미기후 (최근 14일)" if not is_mock else "풍배도 (API 제한 - 샘플 데이터)"
     
     fig = px.bar_polar(counts, r="Freq", theta="Dir", color="Speed", template="plotly_dark",
