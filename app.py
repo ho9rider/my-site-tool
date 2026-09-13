@@ -51,12 +51,11 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("**🌬️ 미기후 분석 (바람장미)**")
-    show_wind = st.checkbox("최근 90일 바람장미(Wind Rose) 표시", value=True)
+    show_wind = st.checkbox("2D 다이어그램 패널에 풍배도 포함", value=True)
 
     st.markdown("---")
     st.markdown("**🏙️ PLATEAU 3D 연동 (스트리밍)**")
-    st.caption("고정밀 도시 3D 모델을 불러옵니다. (렌더링에 몇 초 소요될 수 있음)")
-    use_plateau = st.checkbox("Project PLATEAU 매스 띄우기", value=False)
+    use_plateau = st.checkbox("Project PLATEAU 매스 겹쳐보기", value=False)
     plateau_url = st.text_input("3D Tiles URL", "https://plateau.geospatial.jp/main/data/3d-tiles/bldg/13100_tokyo/13100_tokyo.json")
 
 custom_css = f"""
@@ -74,34 +73,34 @@ h1, h2, h3, p, span, div {{ color: {text_color} !important; }}
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # ==========================================
-# [추가기능 2] 미기후 분석 (풍배도 생성)
+# [수정] 풍배도 생성 함수 (API 파라미터 철자 수정 및 사이즈 조정)
 # ==========================================
 def create_wind_rose(lat, lon):
     try:
-        url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&past_days=90&hourly=windspeed_10m,winddirection_10m"
+        url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&past_days=60&hourly=wind_speed_10m,wind_direction_10m"
         res = requests.get(url, timeout=10)
         data = res.json()
         df = pd.DataFrame(data['hourly']).dropna()
         
         bins = [0, 2, 4, 6, 8, 10, 100]
         labels = ['0-2 m/s', '2-4 m/s', '4-6 m/s', '6-8 m/s', '8-10 m/s', '>10 m/s']
-        df['Speed'] = pd.cut(df['windspeed_10m'], bins=bins, labels=labels, right=False)
+        df['Speed'] = pd.cut(df['wind_speed_10m'], bins=bins, labels=labels, right=False)
         
         dir_bins = np.arange(-11.25, 371.25, 22.5)
         dir_labels = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW', 'N2']
-        df['Dir'] = pd.cut(df['winddirection_10m'], bins=dir_bins, labels=dir_labels)
+        df['Dir'] = pd.cut(df['wind_direction_10m'], bins=dir_bins, labels=dir_labels)
         df['Dir'] = df['Dir'].replace('N2', 'N')
         
         counts = df.groupby(['Dir', 'Speed']).size().reset_index(name='Freq')
         counts['Freq'] = counts['Freq'] / counts['Freq'].sum() * 100
         
         fig = px.bar_polar(counts, r="Freq", theta="Dir", color="Speed", template="plotly_dark",
-                           color_discrete_sequence=px.colors.sequential.Plasma,
-                           title=f"대지 주변 90일 풍배도 (Wind Rose)")
-        fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=50, b=20, l=20, r=20))
+                           color_discrete_sequence=px.colors.sequential.Plasma)
+        fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
+                          margin=dict(t=20, b=20, l=20, r=20),
+                          polar=dict(radialaxis=dict(showticklabels=False)))
         return fig
     except Exception as e:
-        st.error("풍배도 데이터를 불러오지 못했습니다.")
         return None
 
 def calc_real_distance(lon1, lat1, lon2, lat2):
@@ -236,6 +235,60 @@ def get_z_val(x, y, lookup):
     iy = int((y - lookup['y_min']) / (lookup['y_max'] - lookup['y_min']) * (h - 1))
     return float(em[max(0, min(h - 1, iy)), max(0, min(w - 1, ix))])
 
+def create_highlight_diagram(features, target_layer, min_lon, min_lat, max_lon, max_lat, lon_ratio):
+    fig, ax = plt.subplots(figsize=(6, 6), facecolor='#1A1A1F')
+    ax.set_facecolor('#1A1A1F')
+
+    highlight_colors = {'ROAD_BLOCK': '#FFD700', 'BLDG_HIGH': '#FF2A2A', 'BLDG_LOW': '#E0E0E0', 'GREEN': '#32CD32', 'WATER_POLY': '#1E90FF'}
+    muted_color = '#454550'
+
+    cx = ((min_lon + max_lon) / 2) * 100000 * lon_ratio
+    cy = ((min_lat + max_lat) / 2) * 100000
+    width = (max_lon - min_lon) * 100000 * lon_ratio
+    height = (max_lat - min_lat) * 100000
+    radius = min(width, height) / 2 * 0.95 
+
+    clip_circle = mpatches.Circle((cx, cy), radius, transform=ax.transData)
+    base_land = mpatches.Circle((cx, cy), radius, facecolor='#282832', edgecolor='none', zorder=0)
+    base_land.set_clip_path(clip_circle)
+    ax.add_patch(base_land)
+
+    for item in features:
+        layer, ext, ints = item['layer'], item['ext'], item['ints']
+        
+        if layer == 'CONTOUR':
+            if target_layer == 'CONTOUR':
+                h = item.get('height', 0)
+                if h % 5 == 0: line, = ax.plot([pt[0] for pt in ext], [pt[1] for pt in ext], color='#FFFFFF', linewidth=1.5, zorder=6)
+                else: line, = ax.plot([pt[0] for pt in ext], [pt[1] for pt in ext], color='#5D6D7E', linewidth=0.6, zorder=5)
+                line.set_clip_path(clip_circle)
+            continue
+            
+        color = highlight_colors.get(layer, '#FFFFFF') if layer == target_layer else muted_color
+        zorder = 5 if layer == target_layer else 1
+
+        vertices, codes = [], []
+        vertices.extend(ext)
+        codes.extend([mpath.Path.MOVETO] + [mpath.Path.LINETO] * (len(ext) - 1) + [mpath.Path.CLOSEPOLY])
+        vertices.append(ext[0])
+        for hole in ints:
+            vertices.extend(hole)
+            codes.extend([mpath.Path.MOVETO] + [mpath.Path.LINETO] * (len(hole) - 1) + [mpath.Path.CLOSEPOLY])
+            vertices.append(hole[0])
+
+        patch = mpatches.PathPatch(mpath.Path(vertices, codes), facecolor=color, edgecolor='none', antialiased=True, zorder=zorder)
+        patch.set_clip_path(clip_circle)
+        ax.add_patch(patch)
+
+    border_circle = mpatches.Circle((cx, cy), radius, fill=False, edgecolor='#50505A', linewidth=2, zorder=10)
+    ax.add_patch(border_circle)
+    ax.set_xlim(cx - radius * 1.05, cx + radius * 1.05)
+    ax.set_ylim(cy - radius * 1.05, cy + radius * 1.05)
+    ax.set_aspect('equal')
+    plt.axis('off')
+    plt.tight_layout()
+    return fig
+
 st.title("📍 건축 대지 분석 자동화 툴 (6종 핵심 패널)")
 st.markdown("**1. 영역 지정 (사각형 드래그) 또는 단면 확인 (선 긋기)**")
 
@@ -259,20 +312,45 @@ if output and output.get("last_active_drawing"):
         
         dynamic_lon_ratio = math.cos(math.radians((min_lat + max_lat) / 2))
         
-        if st.button("🚀 6종 다이어그램 및 3D 데이터 추출", use_container_width=True):
+        if st.button("🚀 다이어그램 및 3D 데이터 추출", use_container_width=True):
             with st.spinner("OSM 데이터 및 지형/기후 데이터를 분석 중입니다..."):
                 features = get_osm_core_data(min_lon, min_lat, max_lon, max_lat, dynamic_lon_ratio)
                 contours, elev_lookup = get_mapbox_contours(min_lon, min_lat, max_lon, max_lat, MAPBOX_TOKEN, dynamic_lon_ratio)
                 features.extend(contours)
                 
                 st.markdown("---")
-                # 풍배도 차트 렌더링
+                st.markdown("### 🖼️ 2D 개별 분석 패널", unsafe_allow_html=True)
+                
+                row1 = st.columns(3)
+                layers_r1 = ['ROAD_BLOCK', 'BLDG_HIGH', 'BLDG_LOW']
+                titles_r1 = ["🛣️ 도로망", "🏢 고층 건물", "🏠 저층 건물"]
+                for i, col in enumerate(row1):
+                    with col:
+                        st.markdown(f"<div style='text-align: center; margin-bottom:10px;'><b>{titles_r1[i]}</b></div>", unsafe_allow_html=True)
+                        fig = create_highlight_diagram(features, layers_r1[i], min_lon, min_lat, max_lon, max_lat, dynamic_lon_ratio)
+                        st.pyplot(fig)
+                
+                row2 = st.columns(3)
+                layers_r2 = ['GREEN', 'WATER_POLY', 'CONTOUR']
+                titles_r2 = ["🌳 녹지 축", "💧 수공간", "⛰️ 지형 등고선"]
+                for i, col in enumerate(row2):
+                    with col:
+                        st.markdown(f"<div style='text-align: center; margin-bottom:10px;'><b>{titles_r2[i]}</b></div>", unsafe_allow_html=True)
+                        fig = create_highlight_diagram(features, layers_r2[i], min_lon, min_lat, max_lon, max_lat, dynamic_lon_ratio)
+                        st.pyplot(fig)
+
+                # 7번째 다이어그램으로 풍배도 편입
                 if show_wind:
-                    st.markdown("### 🌬️ 미기후 분석 (풍향/풍속 시뮬레이션)")
-                    wind_fig = create_wind_rose((min_lat + max_lat) / 2, (min_lon + max_lon) / 2)
-                    if wind_fig: st.plotly_chart(wind_fig, use_container_width=True)
-                    st.markdown("---")
+                    row3 = st.columns(3)
+                    with row3[0]:
+                        st.markdown("<div style='text-align: center; margin-bottom:10px;'><b>🌬️ 미기후 (풍향/풍속)</b></div>", unsafe_allow_html=True)
+                        wind_fig = create_wind_rose((min_lat + max_lat) / 2, (min_lon + max_lon) / 2)
+                        if wind_fig: 
+                            st.plotly_chart(wind_fig, use_container_width=True)
+                        else:
+                            st.error("기상청 API 오류")
                     
+                st.markdown("---")
                 st.markdown("### 🧊 3D 매스 및 지형 뷰 (PLATEAU 연동 포함)")
                 polygons_3d = []
                 lines_3d = []
@@ -299,8 +377,8 @@ if output and output.get("last_active_drawing"):
                     elif layer == 'GREEN': height, color = 0.2, [50, 205, 50, 180]
                     elif layer == 'WATER_POLY': height, color = 0.1, [30, 144, 255, 180]
                     
-                    if height > 0 and not (use_plateau and layer in ['BLDG_HIGH', 'BLDG_LOW']): 
-                        # 플래토 사용 시 기본 OSM 건물은 숨김 처리
+                    if height > 0: 
+                        # PLATEAU 스위치를 켜도 기본 건물 베이스는 남겨두도록 조건 완화
                         polygons_3d.append({'polygon': geom_3d, 'height': height, 'color': color})
                 
                 deck_layers = [
@@ -308,7 +386,6 @@ if output and output.get("last_active_drawing"):
                     pdk.Layer('PathLayer', data=lines_3d, get_path='path', get_color='color', width_scale=1, width_min_pixels=1.5)
                 ]
                 
-                # [추가기능 3] PLATEAU 타일 스트리밍 (pydeck Tile3DLayer)
                 if use_plateau:
                     plateau_layer = pdk.Layer(
                         "Tile3DLayer",
